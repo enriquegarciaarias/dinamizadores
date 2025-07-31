@@ -1,0 +1,24 @@
+{
+    "environment": {
+        "realPath": "",
+        "inputPath": "process/input",
+        "outputPath": "process/output",
+        ".pycache": ".pycache",
+        "models": "models",
+        "data": "data"
+    },
+    "defaults": {
+        "features": 50,
+        "classes": 4,
+        "smoteFeatures": 1,
+        "imageClasses": ["Panorámica", "Dibujos", "Detalles", "Diapositivas"],
+        "token": "",
+        "device": "cpu"
+    },
+    "models": {
+        "VIT": {
+            "modelName": "ViT-L/14",
+            "pretrainedDataset" : "laion2b_s32b_b82k"
+        }
+    }
+}

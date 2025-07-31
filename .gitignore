@@ -1,0 +1,27 @@
+# Python
+.pycache/ 
+dinamizadores_env/
+
+# Logs & temp files
+Process.txt
+ProcessLog.txt
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git/
+
+models/*
+!models
+
+# Process directories (your current rules were conflicting)
+process/output/*
+!process/output/  # Keep the directory (empty)
+process/input/*
+!process/input/  # Keep the directory (empty)
+
+# Config files (if sensitive)
+config.json
