@@ -23,6 +23,13 @@ cd DescripImg
 pip install -r requirements.txt
 ```
 
+2.  Miscelanea
+
+Instalación de llama-cpp
+```bash
+CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+```
+
 ## ⚙️ Configuración
 La configuración se realiza en config.js, que **no se indexa en el repositorio**. Este archivo se genera a partir del archivo config.ORG incluido.
 

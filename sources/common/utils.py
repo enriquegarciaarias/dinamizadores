@@ -4,6 +4,9 @@ import json
 import time
 import os
 from os.path import isdir
+from PyPDF2 import PdfReader
+from docx import Document
+import shutil
 
 
 def mkdir(dir_path):
@@ -64,3 +67,75 @@ def huggingface_login(token):
         print("Error logging into Hugging Face:", str(e))
         raise
 
+
+def extraer_texto(archivo):
+    """Extrae texto de PDF o Word"""
+    if archivo.endswith('.pdf'):
+        with open(archivo, 'rb') as f:
+            reader = PdfReader(f)
+            return "\n".join([page.extract_text() for page in reader.pages])
+    elif archivo.endswith(('.docx', '.doc')):
+        doc = Document(archivo)
+        return "\n".join([para.text for para in doc.paragraphs])
+    else:
+        raise ValueError("Formato de archivo no soportado")
+
+
+def grabaJson(data, path):
+    try:
+
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+    except Exception as e:
+        log_("error", logger, f"Error write json path:{path}, error:{e}")
+        return False
+
+    log_("info", logger, f"JSON written path:{path}")
+    return True
+
+
+def clean_and_move(path, filepath1, filepath2):
+    # Validate inputs
+    if not os.path.exists(path):
+        print(f"Error: Path '{path}' does not exist")
+        return False
+
+    try:
+        # Recursively delete all contents under path
+        for root, dirs, files in os.walk(path, topdown=False):
+            for name in files:
+                file_path = os.path.join(root, name)
+                try:
+                    os.unlink(file_path)
+                except Exception as e:
+                    raise Exception(f"Failed to delete {file_path}: {e}")
+
+
+            for name in dirs:
+                dir_path = os.path.join(root, name)
+                try:
+                    os.rmdir(dir_path)
+                except Exception as e:
+                    raise Exception(f"Failed to delete {dir_path}: {e}")
+
+        print(f"Successfully cleaned directory: {path}")
+
+        if filepath1 is None:
+            return True
+
+        if not os.path.exists(filepath1):
+            raise Exception(f"Error: Source file '{filepath1}' does not exist")
+
+        if not os.path.exists(filepath2):
+            raise Exception(f"Error: Source file '{filepath2}' does not exist")
+
+        # Move filepath1 to filepath2
+        shutil.move(filepath1, filepath2)
+        print(f"Successfully moved '{filepath1}' to '{filepath2}'")
+
+        return True
+
+    except Exception as e:
+        log_("Exception", logger, f"Operation failed: {e}")
+        return False
