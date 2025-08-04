@@ -7,6 +7,8 @@ from os.path import isdir
 from PyPDF2 import PdfReader
 from docx import Document
 import shutil
+from collections import Counter
+import re
 
 
 def mkdir(dir_path):
@@ -98,7 +100,7 @@ def grabaJson(data, path):
 def clean_and_move(path, filepath1, filepath2):
     # Validate inputs
     if not os.path.exists(path):
-        print(f"Error: Path '{path}' does not exist")
+        print(f"Error: Path {path} does not exist")
         return False
 
     try:
@@ -125,17 +127,42 @@ def clean_and_move(path, filepath1, filepath2):
             return True
 
         if not os.path.exists(filepath1):
-            raise Exception(f"Error: Source file '{filepath1}' does not exist")
+            raise Exception(f"Error: Source file {filepath1} does not exist")
 
         if not os.path.exists(filepath2):
-            raise Exception(f"Error: Source file '{filepath2}' does not exist")
+            raise Exception(f"Error: Source file {filepath2} does not exist")
 
         # Move filepath1 to filepath2
         shutil.move(filepath1, filepath2)
-        print(f"Successfully moved '{filepath1}' to '{filepath2}'")
+        print(f"Successfully moved {filepath1} to {filepath2}")
 
         return True
 
     except Exception as e:
-        log_("Exception", logger, f"Operation failed: {e}")
+        log_("exception", logger, f"Operation failed: {e}")
         return False
+
+def determinarTema(texto):
+    # Palabras clave para cada tema (puedes expandirlas según necesidad)
+    palabras_ciberinteligencia = {"ciberinteligencia", "inteligencia", "osint", "amenazas", "estrategica", "tactica", "soc", "vigilancia"}
+    palabras_ransomware = {"ransomware", "malware", "cifrado", "rescate", "eternalblue", "wannacry", "bitcoin", "secuestro"}
+
+    # Convertir texto a minúsculas y eliminar puntuación
+    texto_limpio = re.sub(r'[^\w\s]', '', texto.lower())
+    palabras_texto = texto_limpio.split()
+
+    # Contar coincidencias
+    contador_ci = Counter(palabras_texto) & Counter(palabras_ciberinteligencia)
+    contador_r = Counter(palabras_texto) & Counter(palabras_ransomware)
+
+    # Calcular puntuación (similitud basada en número de palabras clave)
+    similitud_ci = sum(contador_ci.values()) / len(palabras_ciberinteligencia) if palabras_ciberinteligencia else 0
+    similitud_r = sum(contador_r.values()) / len(palabras_ransomware) if palabras_ransomware else 0
+
+    # Determinar tema con mayor similitud
+    if similitud_ci > similitud_r and similitud_ci > 0.1:  # Umbral mínimo de 10% para certeza
+        return "ciberinteligencia", similitud_ci
+    elif similitud_r > similitud_ci and similitud_r > 0.1:
+        return "ransomware", similitud_r
+    else:
+        return "desconocido", max(similitud_ci, similitud_r)

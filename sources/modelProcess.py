@@ -1,6 +1,6 @@
 from sources.common.common import logger, processControl, log_
 
-from sources.common.utils import huggingface_login, extraer_texto
+from sources.common.utils import huggingface_login, extraer_texto, determinarTema
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 
@@ -8,6 +8,8 @@ from sentence_transformers import SentenceTransformer, util
 from huggingface_hub import hf_hub_download
 import time
 import os
+import json
+import re
 
 from llama_cpp import Llama
 
@@ -26,6 +28,17 @@ def getModel():
     )
     return model_path
 
+def extraer_json_de_texto(output_text):
+    """
+    Extrae el primer bloque JSON válido desde el texto completo generado por el modelo.
+    """
+    posibles_jsones = re.findall(r'\{.*?\}', output_text, re.DOTALL)
+    for j in posibles_jsones:
+        try:
+            return json.loads(j)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 class EvaluadorLlama3Local:
     def __init__(self):
@@ -85,9 +98,10 @@ class EvaluadorLlama3Local:
         {ejercicio}
 
         Analiza este ejercicio y proporciona:
-        1. Evaluación (Apto/No apto)
-        2. Comentario con retroalimentación específica (máx. 50 palabras)
-        3. Detección de posible uso de IA (Sí/No)
+        1. Parte respondida (1. Ransomware/2. Ciberinteligencia)
+        2. Evaluación (Apto/No apto)
+        3. Comentario con retroalimentación específica (máx. 50 palabras)
+        4. Detección de posible uso de IA (Sí/No)       
         """
 
         evaluacion = self.generar_respuesta(prompt)
@@ -106,6 +120,10 @@ class EvaluadorLlama3Local:
             try:
                 ejercicio = extraer_texto(archivo)
                 inicio = time.time()
+                tema, similitud = determinarTema(ejercicio)
+                if not tema:
+                    raise Exception("Tema incorrecto in {archivo}")
+
                 resultado = self.evaluar_ejercicio(instrucciones, ejercicio)
                 tiempo = time.time() - inicio
 
@@ -113,11 +131,12 @@ class EvaluadorLlama3Local:
                     "archivo": archivo,
                     "evaluacion": resultado["evaluacion"],
                     "similitud": resultado["similitud"],
-                    "tiempo_procesamiento": tiempo
+                    "tiempo_procesamiento": tiempo,
+                    "tema": tema,
                 })
 
             except Exception as e:
-                print(f"Error procesando {archivo}: {str(e)}")
+                log_("exception", logger, f"Error procesando {archivo}: {str(e)}")
                 resultados.append({
                     "archivo": archivo,
                     "error": str(e)
@@ -125,6 +144,38 @@ class EvaluadorLlama3Local:
 
         return resultados
 
+
+def extract_evaluation_fields(text):
+    evaluacion = ""
+    if "assistant" in text:
+        start_idx = text.rindex("assistant")  # Usa rindex para la última ocurrencia
+        evaluacion = text[start_idx:].strip()
+
+    result = {
+        "Parte respondida": "",
+        "Evaluación": "",
+        "Comentario": "",
+    }
+
+    if "Comentario:" in evaluacion:
+        start_idx = evaluacion.rindex("Comentario:")  # Use rindex for the last occurrence
+        result["Comentario"] = evaluacion[start_idx + len("Comentario:"):].strip()  # Extract IA content
+        evaluacion = evaluacion[:start_idx].strip()
+
+
+    if "Evaluación:" in evaluacion:
+        start_idx = evaluacion.rindex("Evaluación:")  # Use rindex for the last occurrence
+        result["Evaluación"] = evaluacion[start_idx + len("Evaluación:"):].strip()  # Extract IA content
+        evaluacion = evaluacion[:start_idx].strip()
+
+
+    if "Parte respondida:" in evaluacion:
+        start_idx = evaluacion.rindex("Parte respondida:")  # Use rindex for the last occurrence
+        result["Parte respondida"] = evaluacion[start_idx + len("Parte respondida:"):].strip()  # Extract IA content
+        evaluacion = evaluacion[:start_idx].strip()
+
+
+    return result
 
 class EvaluadorLlama3:
     def __init__(self):
@@ -142,7 +193,8 @@ class EvaluadorLlama3:
             self.model_name,
             quantization_config=bnb_config,
             device_map=processControl.defaults['device'],
-            torch_dtype=torch.float16
+            torch_dtype=torch.float16,
+            max_memory={"cuda:0": "90%"}
         )
         # Modelo para similitud semántica
         self.sim_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
@@ -184,73 +236,117 @@ class EvaluadorLlama3:
             return "Posible copy/paste de chat detectado por tags o frases específicas."
         return "No se detecta uso claro de IA ni copy/paste de chat."
 
-    def generar_respuesta(self, prompt):
-        """Genera respuesta usando Llama 3 local"""
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(processControl.defaults['device'])
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    def generar_respuesta(self, prompt, max_retries=1):
+        """Genera respuesta usando LLaMA 3 local con reintento si el JSON es inválido"""
+        #prompt = prompt.strip()[:4000]  # Limitar longitud del prompt
+        respuesta_json = None
+        output_text = ""
+
+        for intento in range(max_retries + 1):
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(processControl.defaults['device'])
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.7,
+                    top_p=0.9,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            output_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            respuesta_json = extraer_json_de_texto(output_text)
+            return respuesta_json, output_text
+
+        return None, output_text
 
     def evaluar_ejercicio(self, ejercicio):
-        """Evalúa el ejercicio según las instrucciones con formato conciso"""
+        """Evalúa el ejercicio según las instrucciones con formato estructurado JSON"""
         # Calcular similitud semántica
         similitud = self.calcular_similitud(self.instrucciones, ejercicio)
-        # Detectar posible uso de IA o copy/paste
         ia_deteccion = self.detectar_IA(ejercicio, similitud)
 
-        # Construir prompt de evaluación conciso
-        prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|> Eres un profesor asistente. Evalúa el ejercicio comparándolo con las instrucciones. Responde solo con:
-1. Evaluación: Apto/No Apto
-2. Comentario: breve (máx. 30 palabras) con mejoras si Apto, razones si No Apto.
-3. IA: {ia_deteccion}
-INSTRUCCIONES: {self.instrucciones}
-EJERCICIO DEL ESTUDIANTE: {ejercicio}
-<|eot_id|><|start_header_id|>user<|end_header_id|> Proporciona la evaluación.<|eot_id|>"""
+        # Prompt en formato JSON para mayor fiabilidad
+        prompt = f"""<|begin_of_text|>
+<|start_header_id|>system<|end_header_id|>
+Eres un profesor asistente que evalúa ejercicios de estudiantes en ciberseguridad.
+Evalúa de forma objetiva según las instrucciones dadas más abajo. Devuelve **solo** un JSON con estos campos:
+{{
+  "parte": "Ransomware" o "Ciberinteligencia",
+  "evaluacion": "Apto", "No Apto" o "Sobresaliente",
+  "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora. Máximo 25 palabras "
+}}
 
-        # Generar la evaluación
-        respuesta = self.generar_respuesta(prompt)
-        # Extraer la sección de evaluación desde la última ocurrencia de "Evaluación:"
-        evaluacion = ""
-        if "Evaluación:" in respuesta:
-            start_idx = respuesta.rindex("Evaluación:")  # Usa rindex para la última ocurrencia
-            evaluacion = respuesta[start_idx:].strip()
+Instrucciones para la evaluación:
+{self.instrucciones}
+<|eot_id|>
+<|start_header_id|>user<|end_header_id|>
+Aquí tienes el ejercicio del estudiante que debes evaluar:
+
+EJERCICIO DEL ESTUDIANTE:
+{ejercicio}
+---
+Evalúa ahora. Devuelve únicamente un JSON **válido**, completo, que comience con `{{` y termine con `}}`.  
+No añadas ningún otro texto antes o después. 
+<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+"""
+
+        respuesta_json, raw_output = self.generar_respuesta(prompt)
+
+        if not respuesta_json:
+            evaluacion = {
+                "parte": "Desconocido",
+                "evaluacion": "No evaluado",
+                "comentario": "Error al generar una evaluación válida."
+            }
+        else:
+            evaluacion = {
+                "parte": respuesta_json.get("parte", "No especificado"),
+                "evaluacion": respuesta_json.get("evaluacion", "No especificado"),
+                "comentario": respuesta_json.get("comentario", "Sin comentario")
+            }
+
         return {
-            "respuesta": respuesta,
+            "respuesta": raw_output,
             "evaluacion": evaluacion,
-            "ia": ia_deteccion,
+            "IA": ia_deteccion,
             "similitud": similitud
         }
 
     def procesar_lote(self, archivos_ejercicios):
-        """Procesa múltiples ejercicios"""
-        #instrucciones = extraer_texto(archivo_instrucciones)
+        """Procesa múltiples ejercicios de forma robusta"""
         resultados = []
+
         for archivo in archivos_ejercicios:
             try:
                 ejercicio = extraer_texto(archivo)
                 inicio = time.time()
                 resultado = self.evaluar_ejercicio(ejercicio)
-                tiempo_procesamiento = time.time() - inicio
+                duracion = round(time.time() - inicio, 2)
+
                 resultados.append({
                     "archivo": archivo,
-                    "respuesta": resultado["respuesta"],
-                    "evaluacion": resultado["evaluacion"],
-                    "ia": resultado["ia"],
-                    "similitud": resultado["similitud"],
-                    "tiempo_procesamiento": tiempo_procesamiento
+                    "parte": resultado["evaluacion"].get("parte", "Error"),
+                    "evaluacion": resultado["evaluacion"].get("evaluacion", "Error"),
+                    "comentario": resultado["evaluacion"].get("comentario", ""),
+                    "similitud": round(resultado["similitud"], 3),
+                    "IA_detectada": resultado["IA"],
+                    "tiempo_procesamiento": duracion,
+                    "respuesta_modelo": resultado["respuesta"][:1000]  # corta para CSV
                 })
+
             except Exception as e:
-                print(f"Error procesando {archivo}: {str(e)}")
                 resultados.append({
                     "archivo": archivo,
-                    "error": str(e)
+                    "parte": "Error",
+                    "evaluacion": "Error",
+                    "comentario": f"Fallo al procesar: {str(e)}",
+                    "similitud": None,
+                    "IA_detectada": "No evaluado",
+                    "tiempo_procesamiento": 0,
+                    "respuesta_modelo": ""
                 })
+
         return resultados
 
 
@@ -280,120 +376,3 @@ def asignaClaseModelo():
     log_("info", logger, "Modelo cargado correctamente")
     return evaluador
 
-class OLDEvaluadorLlama3:
-    def __init__(self):
-        # Cargar modelo y tokenizer
-        self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        # 4-bit quantization config
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            quantization_config=bnb_config,
-            device_map=processControl.defaults['device'],
-            torch_dtype=torch.float16
-        )
-        # Modelo para similitud semántica
-        self.sim_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-        # Configuración de generación
-        self.gen_config = {
-            "max_length": 2000,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True
-        }
-
-    def calcular_similitud(self, texto1, texto2):
-        """Calcula similitud semántica entre textos"""
-        emb1 = self.sim_model.encode(texto1, convert_to_tensor=True)
-        emb2 = self.sim_model.encode(texto2, convert_to_tensor=True)
-        return util.pytorch_cos_sim(emb1, emb2).item()
-
-    def detectar_IA(self, texto, similitud):
-        """Detecta si el texto parece generado por IA o copiado de chat"""
-        # Umbral de similitud baja y texto largo sugieren IA
-        if similitud < 0.5 and len(texto.split()) > 100:
-            return "Posible uso de IA detectado por baja similitud y longitud excesiva."
-        # Patrones comunes de IA (e.g., repetición, frases genéricas)
-        if "en general" in texto.lower() and "sugerencias de mejora" in texto.lower():
-            return "Posible uso de IA detectado por patrones genéricos."
-        # Detectar copy/paste de chat (tags o frases específicas)
-        chat_tags = ["<|begin_of_text|>", "<|end_of_text|>", "<|start_header_id|>", "<|end_header_id|>"]
-        chat_phrases = ["user:", "assistant:", "por favor, provee", "responde solo con"]
-        if any(tag in texto for tag in chat_tags) or any(phrase in texto.lower() for phrase in chat_phrases):
-            return "Posible copy/paste de chat detectado por tags o frases específicas."
-        return "No se detecta uso claro de IA ni copy/paste de chat."
-
-    def generar_respuesta(self, prompt):
-        """Genera respuesta usando Llama 3 local"""
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(processControl.defaults['device'])
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    def evaluar_ejercicio(self, instrucciones, ejercicio):
-        """Evalúa el ejercicio según las instrucciones con formato conciso"""
-        # Calcular similitud semántica
-        similitud = self.calcular_similitud(instrucciones, ejercicio)
-        # Detectar posible uso de IA o copy/paste
-        ia_deteccion = self.detectar_IA(ejercicio, similitud)
-
-        # Construir prompt de evaluación conciso
-        prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|> Eres un profesor asistente. Evalúa el ejercicio comparándolo con las instrucciones. Responde solo con:
-1. Evaluación: Apto/No Apto
-2. Comentario: breve (máx. 30 palabras) con mejoras si Apto, razones si No Apto.
-3. IA: {ia_deteccion}
-INSTRUCCIONES: {instrucciones}
-EJERCICIO DEL ESTUDIANTE: {ejercicio}
-<|eot_id|><|start_header_id|>user<|end_header_id|> Proporciona la evaluación.<|eot_id|>"""
-
-        # Generar la evaluación
-        respuesta = self.generar_respuesta(prompt)
-        # Extraer la sección de evaluación si existe
-        evaluacion = ""
-        if "Evaluación:" in respuesta:
-            start_idx = respuesta.rindex("Evaluación:")
-            evaluacion = respuesta[start_idx:].strip()
-        return {
-            "respuesta": respuesta,
-            "evaluacion": evaluacion,
-            "ia": ia_deteccion,
-            "similitud": similitud
-        }
-
-    def procesar_lote(self, archivo_instrucciones, archivos_ejercicios):
-        """Procesa múltiples ejercicios"""
-        instrucciones = extraer_texto(archivo_instrucciones)
-        resultados = []
-        for archivo in archivos_ejercicios:
-            try:
-                ejercicio = extraer_texto(archivo)
-                inicio = time.time()
-                resultado = self.evaluar_ejercicio(instrucciones, ejercicio)
-                tiempo_procesamiento = time.time() - inicio
-                resultados.append({
-                    "archivo": archivo,
-                    "respuesta": resultado["respuesta"],
-                    "evaluacion": resultado["evaluacion"],
-                    "ia": resultado["ia"],
-                    "similitud": resultado["similitud"],
-                    "tiempo_procesamiento": tiempo_procesamiento
-                })
-            except Exception as e:
-                print(f"Error procesando {archivo}: {str(e)}")
-                resultados.append({
-                    "archivo": archivo,
-                    "error": str(e)
-                })
-        return resultados

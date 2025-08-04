@@ -41,7 +41,8 @@ def obtieneEjerciciosInstrucciones():
                 if filename.lower().endswith(('.pdf', '.docx', '.doc')):
                     # Renombrar a estandar
                     base_name = "parte1" if len(ejercicios) == 0 else "parte2"
-                    new_name = os.path.join(alumno_path, f"{base_name}.pdf")
+                    original_extension = os.path.splitext(filename)[1].lower()  # Obtiene la extensión original
+                    new_name = os.path.join(alumno_path, f"{base_name}{original_extension}")
                     os.rename(file_path, new_name)
                     ejercicios.append(new_name)
                 else:
@@ -73,6 +74,7 @@ def dinamizaProcess():
         # Procesar lote para cada alumno
         for entry in ejercicios_por_alumno:
             alumno = entry["alumno"]
+            log_("info", logger, f"Procesando ejercicios {alumno}")
             ejercicios = entry["ejercicios"]
             resultados = evaluador.procesar_lote(ejercicios)
             resultados_globales.append({
