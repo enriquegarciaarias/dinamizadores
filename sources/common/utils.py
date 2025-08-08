@@ -142,8 +142,50 @@ def clean_and_move(path, filepath1, filepath2):
         log_("exception", logger, f"Operation failed: {e}")
         return False
 
-def determinarTema(texto):
+def determinarTema(texto, actividad):
     # Palabras clave para cada tema (puedes expandirlas según necesidad)
+    """
+    identificador = {
+        "actividad1":{
+            "ciberinteligencia":["ciberinteligencia", "inteligencia", "osint", "amenazas", "estrategica", "tactica", "soc", "vigilancia"],
+            "ransomware":["ransomware", "malware", "cifrado", "rescate", "eternalblue", "wannacry", "bitcoin", "secuestro"]
+        },
+        "actividad2":{
+            "capas":["capas", "seguridad por capas"],
+            "teletrabajo":["teletrabajo"]
+        }
+    }    
+    """
+
+    identificador = processControl.defaults['identificador']
+    texto = texto.lower()
+
+    # Crear un contador para cada subtema
+    pesos = {}
+
+    # Iterar sobre los subtemas del nivel actual
+    for subtema, palabras_clave in identificador.get(actividad, {}).items():
+        peso = 0
+        for palabra in palabras_clave:
+            # Contar ocurrencias exactas o frases (como "seguridad por capas")
+            if " " in palabra:
+                # Frase exacta
+                peso += texto.count(palabra.lower())
+            else:
+                # Palabra suelta (usamos expresiones regulares para evitar coincidencias parciales)
+                ocurrencias = re.findall(rf'\b{re.escape(palabra.lower())}\b', texto)
+                peso += len(ocurrencias)
+        pesos[subtema] = peso
+
+    # Si todos los pesos son 0, no se puede determinar el tema
+    if all(p == 0 for p in pesos.values()):
+        return "indeterminado"
+
+    # Devolver el subtema con mayor peso
+    return max(pesos, key=pesos.get)
+
+
+    """
     palabras_ciberinteligencia = {"ciberinteligencia", "inteligencia", "osint", "amenazas", "estrategica", "tactica", "soc", "vigilancia"}
     palabras_ransomware = {"ransomware", "malware", "cifrado", "rescate", "eternalblue", "wannacry", "bitcoin", "secuestro"}
 
@@ -165,4 +207,5 @@ def determinarTema(texto):
     elif similitud_r > similitud_ci and similitud_r > 0.1:
         return "ransomware", similitud_r
     else:
-        return "desconocido", max(similitud_ci, similitud_r)
+        return "desconocido", max(similitud_ci, similitud_r)    
+    """

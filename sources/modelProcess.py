@@ -98,10 +98,9 @@ class EvaluadorLlama3Local:
         {ejercicio}
 
         Analiza este ejercicio y proporciona:
-        1. Parte respondida (1. Ransomware/2. Ciberinteligencia)
-        2. Evaluación (Apto/No apto)
-        3. Comentario con retroalimentación específica (máx. 50 palabras)
-        4. Detección de posible uso de IA (Sí/No)       
+        1. Evaluación (Apto/No apto)
+        2. Comentario con retroalimentación específica (máx. 50 palabras)
+        3. Detección de posible uso de IA (Sí/No)       
         """
 
         evaluacion = self.generar_respuesta(prompt)
@@ -120,7 +119,7 @@ class EvaluadorLlama3Local:
             try:
                 ejercicio = extraer_texto(archivo)
                 inicio = time.time()
-                tema, similitud = determinarTema(ejercicio)
+                tema, similitud = determinarTema(ejercicio, processControl.args.act)
                 if not tema:
                     raise Exception("Tema incorrecto in {archivo}")
 
@@ -144,38 +143,6 @@ class EvaluadorLlama3Local:
 
         return resultados
 
-
-def extract_evaluation_fields(text):
-    evaluacion = ""
-    if "assistant" in text:
-        start_idx = text.rindex("assistant")  # Usa rindex para la última ocurrencia
-        evaluacion = text[start_idx:].strip()
-
-    result = {
-        "Parte respondida": "",
-        "Evaluación": "",
-        "Comentario": "",
-    }
-
-    if "Comentario:" in evaluacion:
-        start_idx = evaluacion.rindex("Comentario:")  # Use rindex for the last occurrence
-        result["Comentario"] = evaluacion[start_idx + len("Comentario:"):].strip()  # Extract IA content
-        evaluacion = evaluacion[:start_idx].strip()
-
-
-    if "Evaluación:" in evaluacion:
-        start_idx = evaluacion.rindex("Evaluación:")  # Use rindex for the last occurrence
-        result["Evaluación"] = evaluacion[start_idx + len("Evaluación:"):].strip()  # Extract IA content
-        evaluacion = evaluacion[:start_idx].strip()
-
-
-    if "Parte respondida:" in evaluacion:
-        start_idx = evaluacion.rindex("Parte respondida:")  # Use rindex for the last occurrence
-        result["Parte respondida"] = evaluacion[start_idx + len("Parte respondida:"):].strip()  # Extract IA content
-        evaluacion = evaluacion[:start_idx].strip()
-
-
-    return result
 
 class EvaluadorLlama3:
     def __init__(self):
@@ -205,6 +172,7 @@ class EvaluadorLlama3:
             "top_p": 0.9,
             "do_sample": True
         }
+        """
         instrucciones_path = os.path.join(
             processControl.env['inputPath'],
             processControl.args.act,
@@ -212,7 +180,28 @@ class EvaluadorLlama3:
         )
         if not os.path.exists(instrucciones_path):
             raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-        self.instrucciones = extraer_texto(instrucciones_path)
+        self.instrucciones = extraer_texto(instrucciones_path)        
+        """
+
+        self.instrucciones = {}
+        instrucciones_path = os.path.join(
+            processControl.env['inputPath'],
+            processControl.args.act,
+            f"{processControl.args.act}PlanteamientoYSolucionario1.pdf"
+        )
+        if not os.path.exists(instrucciones_path):
+            raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
+        self.instrucciones['capas'] = extraer_texto(instrucciones_path)
+
+        instrucciones_path = os.path.join(
+            processControl.env['inputPath'],
+            processControl.args.act,
+            f"{processControl.args.act}PlanteamientoYSolucionario2.pdf"
+        )
+        if not os.path.exists(instrucciones_path):
+            raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
+        self.instrucciones['teletrabajo'] = extraer_texto(instrucciones_path)
+
 
 
     def calcular_similitud(self, texto1, texto2):
@@ -259,10 +248,11 @@ class EvaluadorLlama3:
 
         return None, output_text
 
-    def evaluar_ejercicio(self, ejercicio):
+    def evaluar_ejercicio(self, ejercicio, tema):
         """Evalúa el ejercicio según las instrucciones con formato estructurado JSON"""
         # Calcular similitud semántica
-        similitud = self.calcular_similitud(self.instrucciones, ejercicio)
+        instrucciones = self.instrucciones[tema]
+        similitud = self.calcular_similitud(instrucciones, ejercicio)
         ia_deteccion = self.detectar_IA(ejercicio, similitud)
 
         # Prompt en formato JSON para mayor fiabilidad
@@ -271,13 +261,12 @@ class EvaluadorLlama3:
 Eres un profesor asistente que evalúa ejercicios de estudiantes en ciberseguridad.
 Evalúa de forma objetiva según las instrucciones dadas más abajo. Devuelve **solo** un JSON con estos campos:
 {{
-  "parte": "Ransomware" o "Ciberinteligencia",
   "evaluacion": "Apto", "No Apto" o "Sobresaliente",
   "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora. Máximo 25 palabras "
 }}
 
 Instrucciones para la evaluación:
-{self.instrucciones}
+{instrucciones}
 <|eot_id|>
 <|start_header_id|>user<|end_header_id|>
 Aquí tienes el ejercicio del estudiante que debes evaluar:
@@ -295,13 +284,11 @@ No añadas ningún otro texto antes o después.
 
         if not respuesta_json:
             evaluacion = {
-                "parte": "Desconocido",
                 "evaluacion": "No evaluado",
                 "comentario": "Error al generar una evaluación válida."
             }
         else:
             evaluacion = {
-                "parte": respuesta_json.get("parte", "No especificado"),
                 "evaluacion": respuesta_json.get("evaluacion", "No especificado"),
                 "comentario": respuesta_json.get("comentario", "Sin comentario")
             }
@@ -321,24 +308,25 @@ No añadas ningún otro texto antes o después.
             try:
                 ejercicio = extraer_texto(archivo)
                 inicio = time.time()
-                resultado = self.evaluar_ejercicio(ejercicio)
+                tema = determinarTema(ejercicio, processControl.args.act)
+                resultado = self.evaluar_ejercicio(ejercicio, tema)
                 duracion = round(time.time() - inicio, 2)
 
                 resultados.append({
+                    "tema": tema,
                     "archivo": archivo,
-                    "parte": resultado["evaluacion"].get("parte", "Error"),
                     "evaluacion": resultado["evaluacion"].get("evaluacion", "Error"),
                     "comentario": resultado["evaluacion"].get("comentario", ""),
                     "similitud": round(resultado["similitud"], 3),
                     "IA_detectada": resultado["IA"],
-                    "tiempo_procesamiento": duracion,
-                    "respuesta_modelo": resultado["respuesta"][:1000]  # corta para CSV
+                    #"tiempo_procesamiento": duracion,
+                    #"respuesta_modelo": resultado["respuesta"][:1000]  # corta para CSV
                 })
+                log_("info", logger, f'Completado {tema} - {resultado["evaluacion"].get("evaluacion", "Error")} duracion {duracion}')
 
             except Exception as e:
                 resultados.append({
                     "archivo": archivo,
-                    "parte": "Error",
                     "evaluacion": "Error",
                     "comentario": f"Fallo al procesar: {str(e)}",
                     "similitud": None,
