@@ -1,7 +1,18 @@
 from sources.common.common import logger, processControl, log_
 
-from sources.common.utils import grabaJson, dbTimestamp, clean_and_move
-from sources.modelProcess import asignaClaseModelo
+from sources.common.utils import (
+    grabaJson,
+    dbTimestamp,
+    clean_and_move,
+    read_json,
+    upsertAlumnoHistorico,
+    extraer_texto_y_metas,
+    texto_hash,
+    existe_hash_en_otro_alumno,
+    calcular_semaforos,
+)
+from sources.modelProcess import asignaClaseModeloEvaluacion, inicializaEntorno
+from sources.modelPerplexity import inicializaAItest, calcular_perplejidad
 
 import os
 import zipfile
@@ -62,13 +73,18 @@ def obtieneEjerciciosInstrucciones():
 
 def dinamizaProcess():
     resultados_globales = []
+    historicoPath = os.path.join(processControl.env['outputPath'], f"historico_{processControl.args.act}")
+    historicoResults = read_json(historicoPath)
     inputZipPath = outputZipPath = output_dir = None
+    inicializaEntorno()
+
+    #Primer paso para evaluación
     try:
         """Preprocesa archivos y procesa los ejercicios de los alumnos"""
         ejercicios_por_alumno, zipFileName, output_dir = obtieneEjerciciosInstrucciones()
 
         # Instanciar evaluador
-        evaluador = asignaClaseModelo()  # Asume que esta función devuelve una instancia de EvaluadorLlama3
+        evaluador = asignaClaseModeloEvaluacion()  # Asume que esta función devuelve una instancia de EvaluadorLlama3
         log_("info", logger, "\nProcesando ejercicios...")
 
         # Procesar lote para cada alumno
@@ -82,16 +98,62 @@ def dinamizaProcess():
                 "resultados": resultados
             })
 
-        periodo = dbTimestamp()
-        jsonPath = os.path.join(processControl.env['outputPath'], f"{processControl.args.act}_resultados-{periodo}.json")
-        grabaJson(resultados_globales, jsonPath)
-        inputZipPath = os.path.join(processControl.env['inputPath'], zipFileName)
-        outputZipPath = os.path.join(processControl.env['outputPath'], f"{periodo}_{zipFileName}")
+
+            elemento = {
+                "alumno": alumno,
+                "resultados": resultados,
+
+            }
+            historicoResults = upsertAlumnoHistorico(historicoResults, elemento)
+
+
 
     except Exception as e:
         log_("exception", logger, f"Error en proceso Dinamiza {e}")
 
+    try:
+        model, tokenizer = inicializaAItest()
+        for entry in resultados_globales:
+            alumno = entry["alumno"]
+            resultados = entry["resultados"]
 
+            newElement = {
+                "alumno": alumno,
+                "resultados": resultados,
+            }
+
+            for idx, elemento in enumerate(resultados):
+                extraccion = extraer_texto_y_metas(elemento['archivo']) # usa "general" si no existe
+                ejercicio = extraccion['texto']
+                metas = extraccion['metadatos']
+                semaforos = calcular_semaforos(metas)
+                log_("info", logger, f"Semáforos {semaforos}")
+
+                hashValue = texto_hash(ejercicio)
+                repetido = existe_hash_en_otro_alumno(historicoResults, alumno, hashValue)
+                if repetido:
+                    log_("info", logger, f"Se encontrado repetido {repetido}")
+                perplexity = calcular_perplejidad(ejercicio, model, tokenizer)
+                perplexity = round(perplexity, 2)
+                log_("debug", logger, f"Perplexity {alumno}-{perplexity}")
+                newElement["resultados"][idx].setdefault("perplexity", None)
+                newElement["resultados"][idx].setdefault("hash", None)
+                newElement["resultados"][idx].setdefault("metas", None)
+                newElement['resultados'][idx]['perplexity'] = perplexity
+                newElement['resultados'][idx]['hash'] = hashValue
+                newElement['resultados'][idx]['metas'] = metas
+
+            historicoResults = upsertAlumnoHistorico(historicoResults, newElement)
+
+    except Exception as e:
+        log_("exception", logger, f"Error en proceso Dinamiza AI tester {e}")
+
+    periodo = dbTimestamp()
+    jsonPath = os.path.join(processControl.env['outputPath'], f"{processControl.args.act}_resultados-{periodo}.json")
+    grabaJson(resultados_globales, jsonPath)
+    grabaJson(historicoResults, historicoPath)
+    inputZipPath = os.path.join(processControl.env['inputPath'], zipFileName)
+    outputZipPath = os.path.join(processControl.env['outputPath'], f"{periodo}_{zipFileName}")
     clean_and_move(output_dir, inputZipPath, outputZipPath)
     return len(resultados_globales)
 

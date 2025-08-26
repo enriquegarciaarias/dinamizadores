@@ -10,6 +10,7 @@ from sources.dinamProcess import dinamizaProcess
 from sources.common.paramsManager import getConfigs
 
 def mainProcess():
+
     result = dinamizaProcess()
     return True
 

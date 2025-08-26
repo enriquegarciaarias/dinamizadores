@@ -2,6 +2,7 @@ from sources.common.common import logger, processControl, log_
 import json
 
 import time
+from datetime import datetime
 import os
 from os.path import isdir
 from PyPDF2 import PdfReader
@@ -9,6 +10,8 @@ from docx import Document
 import shutil
 from collections import Counter
 import re
+import hashlib
+
 
 
 def mkdir(dir_path):
@@ -81,6 +84,60 @@ def extraer_texto(archivo):
         return "\n".join([para.text for para in doc.paragraphs])
     else:
         raise ValueError("Formato de archivo no soportado")
+
+
+def extraer_texto_y_metas(archivo):
+    """
+    Extrae texto y metadatos básicos de PDF o Word.
+
+    Args:
+        archivo (str): Ruta al archivo .pdf, .docx o .doc
+
+    Returns:
+        dict: {"texto": str, "metadatos": dict}
+    """
+    resultado = {"texto": "", "metadatos": {}}
+
+    # Añadir siempre metadatos básicos del sistema
+    resultado["metadatos"]["nombre_archivo"] = os.path.basename(archivo)
+    resultado["metadatos"]["tamano_bytes"] = os.path.getsize(archivo)
+
+    if archivo.endswith('.pdf'):
+        with open(archivo, 'rb') as f:
+            reader = PdfReader(f)
+            texto = "\n".join([page.extract_text() or "" for page in reader.pages])
+            resultado["texto"] = texto
+
+            # Metadatos PDF
+            resultado["metadatos"]["num_paginas"] = len(reader.pages)
+            if reader.metadata:
+                for k, v in reader.metadata.items():
+                    resultado["metadatos"][k.replace("/", "")] = str(v)
+
+    elif archivo.endswith('.docx'):
+        doc = Document(archivo)
+        texto = "\n".join([para.text for para in doc.paragraphs])
+        resultado["texto"] = texto
+
+        # Metadatos DOCX
+        props = doc.core_properties
+        resultado["metadatos"].update({
+            "titulo": props.title,
+            "autor": props.author,
+            "asunto": props.subject,
+            "categoria": props.category,
+            "comentarios": props.comments,
+            "palabras_clave": props.keywords,
+            "ultima_modificacion": str(props.modified),
+            "creado": str(props.created)
+        })
+
+    elif archivo.endswith('.doc'):
+        raise ValueError("Los archivos .doc antiguos no tienen soporte completo en python-docx.")
+    else:
+        raise ValueError("Formato de archivo no soportado")
+
+    return resultado
 
 
 def grabaJson(data, path):
@@ -209,3 +266,153 @@ def determinarTema(texto, actividad):
     else:
         return "desconocido", max(similitud_ci, similitud_r)    
     """
+def extraer_json_de_texto(output_text):
+    """
+    Extrae el primer bloque JSON válido desde el texto completo generado por el modelo.
+    """
+    posibles_jsones = re.findall(r'\{.*?\}', output_text, re.DOTALL)
+    for j in posibles_jsones:
+        try:
+            return json.loads(j)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def read_json(filepath):
+    """
+    Reads a JSON file and returns its contents.
+    If the file does not exist or is empty, returns [].
+    """
+    if not os.path.exists(filepath):
+        return []
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data
+    except (json.JSONDecodeError, ValueError):
+        # File exists but is not valid JSON
+        return []
+
+
+def searchAlumnoHistorico(json_data, alumno_name):
+    """
+    Search in a JSON list of dicts for entries where 'alumno' == alumno_name.
+
+    Args:
+        json_data (list): List of dictionaries with keys "alumno" and "ejercicio".
+        alumno_name (str): Name of the alumno to search for.
+
+    Returns:
+        list: All matching elements. Empty list if none found.
+    """
+    if not isinstance(json_data, list):
+        return []
+
+    results = [item for item in json_data if item.get("alumno") == alumno_name]
+    return results if results else []
+
+
+def upsertAlumnoHistorico(json_data, elemento):
+    """
+    Inserta o actualiza el registro de un alumno en el histórico.
+
+    Si el alumno ya existe en json_data, se eliminan sus entradas anteriores
+    y se inserta la nueva. Si no existe, simplemente se inserta.
+
+    Args:
+        json_data (list): Lista de diccionarios con claves 'alumno' y 'ejercicio'.
+        alumno_name (str): Nombre del alumno.
+        ejercicio (int): Número de ejercicio.
+
+    Returns:
+        list: La lista actualizada.
+    """
+    if not isinstance(json_data, list):
+        json_data = []
+
+    # Eliminar entradas previas del alumno
+    json_data = [item for item in json_data if item.get("alumno") != elemento['alumno']]
+
+    # Insertar el nuevo registro
+    json_data.append(elemento)
+
+    return json_data
+
+
+def texto_hash(texto, method="sha256"):
+    """
+    Devuelve el hash de un texto.
+    """
+    if method == "md5":
+        return hashlib.md5(texto.encode("utf-8")).hexdigest()
+    elif method == "sha256":
+        return hashlib.sha256(texto.encode("utf-8")).hexdigest()
+    else:
+        raise ValueError("Método de hash no soportado")
+
+
+def existe_hash_en_otro_alumno(json_data, alumnoBuscar, hashBuscar):
+    """
+    Busca si un hash ya existe en el JSON en registros de alumnos distintos al alumno dado.
+
+    Args:
+        json_data (list): Lista de alumnos con sus resultados.
+        alumnoBuscar (str): Nombre del alumno actual.
+        hashBuscar (str): Hash a verificar.
+
+    Returns:
+        dict or None: El registro encontrado (alumno, tema, archivo) si existe en otro alumno,
+                      None si no hay coincidencias.
+    """
+    for alumno_entry in json_data:
+        alumno = alumno_entry.get("alumno")
+        if alumno != alumnoBuscar:  # mirar solo en otros alumnos
+            for resultado in alumno_entry.get("resultados", []):
+                if resultado.get("hash") == hashBuscar:
+                    return {
+                        "alumno": alumno,
+                        "tema": resultado.get("tema"),
+                        "archivo": resultado.get("archivo")
+                    }
+    return None
+
+
+def calcular_semaforos(metasDict):
+    """
+    Genera un diccionario de 'semaforos' a partir de metadatos.
+
+    Args:
+        metasDict (dict): Diccionario con posibles claves como 'autor', 'Author',
+                          'ultima_modificacion', 'creado', 'Producer', 'Creator'.
+
+    Returns:
+        dict: Diccionario con los semáforos construidos.
+    """
+    semaforos = {}
+
+    # Autor (case-insensitive entre autor / Author)
+    if "autor" in metasDict and metasDict["autor"]:
+        semaforos["autor"] = metasDict["autor"]
+    elif "Author" in metasDict and metasDict["Author"]:
+        semaforos["autor"] = metasDict["Author"]
+
+    # Diferencia temporal en minutos (truncada a 2 decimales)
+    if "ultima_modificacion" in metasDict and "creado" in metasDict:
+        try:
+            fmt = "%Y-%m-%d %H:%M:%S%z"  # formato "2025-07-04 10:26:00+00:00"
+            mod_time = datetime.strptime(str(metasDict["ultima_modificacion"]), fmt)
+            creado_time = datetime.strptime(str(metasDict["creado"]), fmt)
+            diff_minutes = (mod_time - creado_time).total_seconds() / 60
+            semaforos["time"] = round(diff_minutes, 2)  # truncado a 2 decimales
+        except Exception as e:
+            semaforos["time"] = f"Error calculando diferencia: {e}"
+
+    # Producer o Creator (si existen, ambos van a 'producer')
+    if "Producer" in metasDict and metasDict["Producer"]:
+        semaforos["producer"] = metasDict["Producer"]
+    elif "Creator" in metasDict and metasDict["Creator"]:
+        semaforos["producer"] = metasDict["Creator"]
+
+    return semaforos

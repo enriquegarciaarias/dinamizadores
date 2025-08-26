@@ -1,6 +1,6 @@
 from sources.common.common import logger, processControl, log_
 
-from sources.common.utils import huggingface_login, extraer_texto, determinarTema
+from sources.common.utils import huggingface_login, extraer_texto, determinarTema, extraer_json_de_texto
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 
@@ -28,17 +28,7 @@ def getModel():
     )
     return model_path
 
-def extraer_json_de_texto(output_text):
-    """
-    Extrae el primer bloque JSON válido desde el texto completo generado por el modelo.
-    """
-    posibles_jsones = re.findall(r'\{.*?\}', output_text, re.DOTALL)
-    for j in posibles_jsones:
-        try:
-            return json.loads(j)
-        except json.JSONDecodeError:
-            continue
-    return None
+
 
 class EvaluadorLlama3Local:
     def __init__(self):
@@ -184,15 +174,19 @@ class EvaluadorLlama3:
         """
 
         self.instrucciones = {}
-        instrucciones_path = os.path.join(
-            processControl.env['inputPath'],
-            processControl.args.act,
-            f"{processControl.args.act}PlanteamientoYSolucionario1.pdf"
-        )
-        if not os.path.exists(instrucciones_path):
-            raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-        self.instrucciones['capas'] = extraer_texto(instrucciones_path)
 
+        for idx, tema in enumerate(processControl.defaults['identificador'][processControl.args.act]):
+            indice = idx + 1
+            instrucciones_path = os.path.join(
+                processControl.env['inputPath'],
+                processControl.args.act,
+                f"{processControl.args.act}PlanteamientoYSolucionario{indice}.pdf"
+            )
+            if not os.path.exists(instrucciones_path):
+                raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
+            self.instrucciones[tema] = extraer_texto(instrucciones_path)
+
+        """
         instrucciones_path = os.path.join(
             processControl.env['inputPath'],
             processControl.args.act,
@@ -200,9 +194,8 @@ class EvaluadorLlama3:
         )
         if not os.path.exists(instrucciones_path):
             raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-        self.instrucciones['teletrabajo'] = extraer_texto(instrucciones_path)
-
-
+        self.instrucciones['teletrabajo'] = extraer_texto(instrucciones_path)        
+        """
 
     def calcular_similitud(self, texto1, texto2):
         """Calcula similitud semántica entre textos"""
@@ -280,12 +273,36 @@ No añadas ningún otro texto antes o después.
 <|start_header_id|>assistant<|end_header_id|>
 """
 
-        respuesta_json, raw_output = self.generar_respuesta(prompt)
+        """
+                respuesta_json, raw_output = self.generar_respuesta(prompt)
 
         if not respuesta_json:
             evaluacion = {
                 "evaluacion": "No evaluado",
                 "comentario": "Error al generar una evaluación válida."
+            }
+        else:
+            evaluacion = {
+                "evaluacion": respuesta_json.get("evaluacion", "No especificado"),
+                "comentario": respuesta_json.get("comentario", "Sin comentario")
+            }
+        """
+        respuesta_json, raw_output = None, ""
+        error_msg = None
+        try:
+            respuesta_json, raw_output = self.generar_respuesta(prompt)
+
+        except Exception as e:
+            error_msg = f"Excepción en generar_respuesta: {type(e).__name__} - {e}"
+
+        if not respuesta_json:
+            evaluacion = {
+                "evaluacion": "No evaluado",
+                "comentario": (
+                    f"Error al generar evaluación válida. "
+                    f"{error_msg or ''} "
+                    f"Salida modelo: {raw_output[:300]}..."
+                ).strip()
             }
         else:
             evaluacion = {
@@ -305,6 +322,7 @@ No añadas ningún otro texto antes o después.
         resultados = []
 
         for archivo in archivos_ejercicios:
+            tema = "indefinido"
             try:
                 ejercicio = extraer_texto(archivo)
                 inicio = time.time()
@@ -326,20 +344,19 @@ No añadas ningún otro texto antes o después.
 
             except Exception as e:
                 resultados.append({
+                    "tema": tema,
                     "archivo": archivo,
                     "evaluacion": "Error",
                     "comentario": f"Fallo al procesar: {str(e)}",
                     "similitud": None,
                     "IA_detectada": "No evaluado",
-                    "tiempo_procesamiento": 0,
-                    "respuesta_modelo": ""
+                    #"tiempo_procesamiento": 0,
+                    #"respuesta_modelo": ""
                 })
 
         return resultados
 
-
-# Función externa para instanciar la clase (simulada)
-def asignaClaseModelo():
+def inicializaEntorno():
     processControl.defaults['device'] = "cuda" if torch.cuda.is_available() else "cpu"
     if processControl.defaults['device'] == "cuda":
         os.environ["RANK"] = "0"
@@ -353,14 +370,14 @@ def asignaClaseModelo():
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    log_("info", logger, f"Inicializando modelo Llama 3 en Device: {processControl.defaults['device']}")
+    log_("info", logger, f"Inicializando modelos en Device: {processControl.defaults['device']}")
 
 
-
-
+# Función externa para instanciar la clase (simulada)
+def asignaClaseModeloEvaluacion():
     huggingface_login(processControl.defaults['huggingface_login'])
     #evaluador = EvaluadorLlama3Local()
     evaluador = EvaluadorLlama3()
-    log_("info", logger, "Modelo cargado correctamente")
+    log_("info", logger, "Modelo cargado LLama3 correctamente")
     return evaluador
 
