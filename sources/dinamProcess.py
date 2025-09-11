@@ -24,13 +24,14 @@ def obtieneEjerciciosInstrucciones():
     os.makedirs(output_dir, exist_ok=True)
 
     # Detectar el único archivo ZIP en input_path
-    zip_files = [f for f in os.listdir(input_path) if f.lower().endswith('.zip')]
-    if len(zip_files) != 1:
-        raise FileNotFoundError(f"Se esperaba exactamente 1 archivo ZIP en {input_path}, encontrados {len(zip_files)}")
-    zip_path = os.path.join(input_path, zip_files[0])
+    if processControl.args.unzip:
+        zip_files = [f for f in os.listdir(input_path) if f.lower().endswith('.zip')]
+        if len(zip_files) != 1:
+            raise FileNotFoundError(f"Se esperaba exactamente 1 archivo ZIP en {input_path}, encontrados {len(zip_files)}")
+        zip_path = os.path.join(input_path, zip_files[0])
 
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(output_dir)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(output_dir)
 
     """
     # Cargar instrucciones

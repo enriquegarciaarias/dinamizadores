@@ -255,7 +255,7 @@ Eres un profesor asistente que evalúa ejercicios de estudiantes en cibersegurid
 Evalúa de forma objetiva según las instrucciones dadas más abajo. Devuelve **solo** un JSON con estos campos:
 {{
   "evaluacion": "Apto", "No Apto" o "Sobresaliente",
-  "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora. Máximo 25 palabras "
+  "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora relacionadas con las instrucciones. Máximo 25 palabras "
 }}
 
 Instrucciones para la evaluación:
