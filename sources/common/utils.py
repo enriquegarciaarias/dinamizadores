@@ -3,13 +3,12 @@ import json
 
 import time
 from datetime import datetime
-import os
+import os, re, unicodedata
 from os.path import isdir
 from PyPDF2 import PdfReader
 from docx import Document
 import shutil
 from collections import Counter
-import re
 import hashlib
 
 
@@ -86,57 +85,84 @@ def extraer_texto(archivo):
         raise ValueError("Formato de archivo no soportado")
 
 
-def extraer_texto_y_metas(archivo):
+def limpiar_texto_para_llm(texto):
+    """Limpia y normaliza texto para ser usado con LLMs."""
+    texto = unicodedata.normalize("NFKC", texto)
+    texto = re.sub(r"[\x00-\x1F\x7F]+", " ", texto)
+    texto = re.sub(r"\s{2,}", " ", texto)
+
+    lineas = texto.splitlines()
+    limpio = []
+    vistos = set()
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea or len(linea) < 3:
+            continue
+        if linea in vistos:
+            continue
+        vistos.add(linea)
+        limpio.append(linea)
+    texto = "\n".join(limpio)
+    texto = re.sub(r"\n{2,}", "\n", texto).strip()
+    return texto
+
+
+def extraerTextoMetas(archivo, max_paginas=None):
     """
-    Extrae texto y metadatos básicos de PDF o Word.
-
-    Args:
-        archivo (str): Ruta al archivo .pdf, .docx o .doc
-
-    Returns:
-        dict: {"texto": str, "metadatos": dict}
+    Extrae texto limpio y metadatos básicos, preparado para enviar a un LLM.
     """
     resultado = {"texto": "", "metadatos": {}}
+    nombre = os.path.basename(archivo)
+    extension = os.path.splitext(nombre)[1].lower()
 
-    # Añadir siempre metadatos básicos del sistema
-    resultado["metadatos"]["nombre_archivo"] = os.path.basename(archivo)
-    resultado["metadatos"]["tamano_bytes"] = os.path.getsize(archivo)
+    resultado["metadatos"].update({
+        "nombre_archivo": nombre,
+        "tamano_bytes": os.path.getsize(archivo),
+        "extension": extension,
+    })
 
-    if archivo.endswith('.pdf'):
-        with open(archivo, 'rb') as f:
-            reader = PdfReader(f)
-            texto = "\n".join([page.extract_text() or "" for page in reader.pages])
-            resultado["texto"] = texto
+    texto_completo = ""
 
-            # Metadatos PDF
-            resultado["metadatos"]["num_paginas"] = len(reader.pages)
-            if reader.metadata:
-                for k, v in reader.metadata.items():
-                    resultado["metadatos"][k.replace("/", "")] = str(v)
+    if extension == ".pdf":
+        try:
+            with open(archivo, "rb") as f:
+                reader = PdfReader(f)
+                num_paginas = len(reader.pages)
+                resultado["metadatos"]["num_paginas"] = num_paginas
 
-    elif archivo.endswith('.docx'):
-        doc = Document(archivo)
-        texto = "\n".join([para.text for para in doc.paragraphs])
-        resultado["texto"] = texto
+                for i, page in enumerate(reader.pages):
+                    if max_paginas and i >= max_paginas:
+                        break
+                    try:
+                        page_text = page.extract_text() or ""
+                        texto_completo += f"\n--- Página {i+1} ---\n{page_text}"
+                    except Exception as e:
+                        texto_completo += f"\n[Error en página {i+1}: {e}]"
+        except Exception as e:
+            texto_completo = f"[ERROR leyendo PDF: {e}]"
 
-        # Metadatos DOCX
-        props = doc.core_properties
-        resultado["metadatos"].update({
-            "titulo": props.title,
-            "autor": props.author,
-            "asunto": props.subject,
-            "categoria": props.category,
-            "comentarios": props.comments,
-            "palabras_clave": props.keywords,
-            "ultima_modificacion": str(props.modified),
-            "creado": str(props.created)
-        })
+    elif extension == ".docx":
+        try:
+            doc = Document(archivo)
+            texto = "\n".join(para.text for para in doc.paragraphs)
+            texto_completo = texto
 
-    elif archivo.endswith('.doc'):
-        raise ValueError("Los archivos .doc antiguos no tienen soporte completo en python-docx.")
+            props = doc.core_properties
+            resultado["metadatos"].update({
+                "titulo": props.title or "",
+                "autor": props.author or "",
+                "creado": str(props.created or ""),
+                "ultima_modificacion": str(props.modified or "")
+            })
+        except Exception as e:
+            texto_completo = f"[ERROR leyendo DOCX: {e}]"
+
     else:
-        raise ValueError("Formato de archivo no soportado")
+        raise ValueError("Solo se admiten .pdf o .docx")
 
+    # Limpieza final
+    texto_limpio = limpiar_texto_para_llm(texto_completo)
+    resultado["texto"] = texto_limpio
     return resultado
 
 

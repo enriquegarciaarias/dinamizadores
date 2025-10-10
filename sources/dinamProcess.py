@@ -6,7 +6,7 @@ from sources.common.utils import (
     clean_and_move,
     read_json,
     upsertAlumnoHistorico,
-    extraer_texto_y_metas,
+    extraerTextoMetas,
     texto_hash,
     existe_hash_en_otro_alumno,
     calcular_semaforos,
@@ -124,7 +124,7 @@ def dinamizaProcess():
             }
 
             for idx, elemento in enumerate(resultados):
-                extraccion = extraer_texto_y_metas(elemento['archivo']) # usa "general" si no existe
+                extraccion = extraerTextoMetas(elemento['archivo']) # usa "general" si no existe
                 ejercicio = extraccion['texto']
                 metas = extraccion['metadatos']
                 semaforos = calcular_semaforos(metas)
