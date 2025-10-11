@@ -10,6 +10,7 @@ import time
 import os
 import json
 import re
+import gc
 
 from llama_cpp import Llama
 
@@ -134,11 +135,13 @@ class EvaluadorLlama3Local:
         return resultados
 
 
-class EvaluadorLlama3:
+class OLDEvaluadorLlama3:
     def __init__(self):
         # Cargar modelo y tokenizer
         self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         # 4-bit quantization config
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -357,6 +360,7 @@ No añadas ningún otro texto antes o después.
         return resultados
 
 def inicializaEntorno():
+    huggingface_login(processControl.defaults['huggingface_login'])
     processControl.defaults['device'] = "cuda" if torch.cuda.is_available() else "cpu"
     if processControl.defaults['device'] == "cuda":
         os.environ["RANK"] = "0"
@@ -380,4 +384,120 @@ def asignaClaseModeloEvaluacion():
     evaluador = EvaluadorLlama3()
     log_("info", logger, "Modelo cargado LLama3 correctamente")
     return evaluador
+
+
+
+GPU_BATCH_SIZE = 4                # cuantos items tokenizar/generar por batch en GPU
+QUEUE_MAXSIZE = 64                # tamaño máximo de la cola (control de memoria)
+JSONL_HISTORICO = True            # si True escribe JSONL incremental
+HISTORICO_PATH = lambda: os.path.join(processControl.env['outputPath'], f"historico_{processControl.args.act}")
+INFER_MAX_NEW_TOKENS = 512
+PROMPT_MAX_CHARS = 35000  # Ajustado para prompts largos
+
+class EvaluadorLlama3:
+    def __init__(self):
+        self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Quantización 4-bit
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=False,
+            bnb_4bit_compute_dtype=torch.float16
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            offload_folder="/tmp/llama_offload",
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True
+        )
+
+        # SentenceTransformer en CPU
+        self.sim_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2', device='cpu')
+
+        self.gen_kwargs = {
+            "max_new_tokens": INFER_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "do_sample": True,
+            "pad_token_id": self.tokenizer.eos_token_id
+        }
+
+        # --- Cargar instrucciones por tema ---
+        self.instrucciones = {}
+        for idx, tema in enumerate(processControl.defaults['identificador'][processControl.args.act]):
+            indice = idx + 1
+            instrucciones_path = os.path.join(
+                processControl.env['inputPath'],
+                processControl.args.act,
+                f"{processControl.args.act}PlanteamientoYSolucionario{indice}.pdf"
+            )
+            if os.path.exists(instrucciones_path):
+                self.instrucciones[tema] = extraer_texto(instrucciones_path)
+            else:
+                log_("warning", logger, f"No se encontraron las instrucciones en {instrucciones_path}")
+
+    def calcular_similitud(self, texto1, texto2):
+        emb1 = self.sim_model.encode(texto1, convert_to_tensor=True)
+        emb2 = self.sim_model.encode(texto2, convert_to_tensor=True)
+        return util.pytorch_cos_sim(emb1, emb2).item()
+
+    def generar_batch(self, prompts: list[str]):
+        results = []
+        device = next(self.model.parameters()).device
+
+        encoded = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **self.gen_kwargs
+            )
+
+        for out in outputs:
+            txt = self.tokenizer.decode(out, skip_special_tokens=True)
+            try:
+                parsed = extraer_json_de_texto(txt)
+            except Exception:
+                parsed = None
+            results.append((txt, parsed))
+
+        del input_ids, attention_mask, outputs, encoded
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        return results
+
+    def evaluar_ejercicio_prompt(self, prompt, tema):
+        """
+        Construye prompt final usando instrucciones internas por tema.
+        Retorna (texto, JSON)
+        """
+        instrucciones = self.instrucciones.get(tema, "")
+        prompt_full = f"""<|begin_of_text|>
+<|start_header_id|>system<|end_header_id|>
+Eres un profesor asistente que evalúa ejercicios de estudiantes en ciberseguridad.
+Devuelve solo un JSON válido con los campos: "evaluacion" y "comentario".
+Instrucciones:
+{instrucciones}
+<|eot_id|>
+<|start_header_id|>user<|end_header_id|>
+{prompt}
+<|eot_id|>
+"""
+        if len(prompt_full) > PROMPT_MAX_CHARS:
+            prompt_full = prompt_full[:PROMPT_MAX_CHARS]
+
+        return self.generar_batch([prompt_full])[0]  # (texto, JSON)
+
+
 
