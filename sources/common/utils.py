@@ -225,27 +225,77 @@ def clean_and_move(path, filepath1, filepath2):
         log_("exception", logger, f"Operation failed: {e}")
         return False
 
-def determinarTema(texto, actividad):
-    # Palabras clave para cada tema (puedes expandirlas según necesidad)
+
+def determinarTema(lista_ejercicios, actividad):
     """
-    identificador = {
-        "actividad1":{
-            "ciberinteligencia":["ciberinteligencia", "inteligencia", "osint", "amenazas", "estrategica", "tactica", "soc", "vigilancia"],
-            "ransomware":["ransomware", "malware", "cifrado", "rescate", "eternalblue", "wannacry", "bitcoin", "secuestro"]
-        },
-        "actividad2":{
-            "capas":["capas", "seguridad por capas"],
-            "teletrabajo":["teletrabajo"]
+    Determina el tema más probable de cada texto dentro de una lista de ejercicios.
+    Considera los pesos relativos de todos los textos (comparación cruzada).
+
+    Parámetros:
+    - lista_ejercicios: lista de diccionarios con la estructura:
+        {
+            "ejercicioTexto": str,
+            "metas": dict,
+            "elemento": any
         }
-    }    
+    - actividad: clave de actividad dentro de processControl.defaults['identificador']
+
+    Devuelve:
+    - lista con misma estructura + campo "tema" asignado a cada ejercicio.
     """
 
+    identificador = processControl.defaults['identificador']
+    temas = identificador.get(actividad, {})
+
+    # --- 1. Calcular pesos por texto y tema ---
+    for ejercicio in lista_ejercicios:
+        texto = ejercicio["ejercicioTexto"].lower()
+        pesos = {}
+
+        for subtema, palabras_clave in temas.items():
+            peso = 0
+            for palabra in palabras_clave:
+                if " " in palabra:
+                    peso += texto.count(palabra.lower())
+                else:
+                    ocurrencias = re.findall(rf'\b{re.escape(palabra.lower())}\b', texto)
+                    peso += len(ocurrencias)
+            pesos[subtema] = peso
+
+        ejercicio["pesos"] = pesos  # guardamos los pesos parciales
+
+    # --- 2. Ajuste relativo entre textos ---
+    # Calculamos la suma total de pesos por tema en todos los ejercicios
+    suma_temas = {t: 0 for t in temas}
+    for ejercicio in lista_ejercicios:
+        for t, p in ejercicio["pesos"].items():
+            suma_temas[t] += p
+
+    # --- 3. Asignar tema más probable a cada texto ---
+    for ejercicio in lista_ejercicios:
+        pesos = ejercicio["pesos"]
+
+        # Si todos los pesos son 0 → "indeterminado"
+        if all(p == 0 for p in pesos.values()):
+            ejercicio["tema"] = "indeterminado"
+            continue
+
+        # Ajuste relativo: se pondera el peso local sobre el peso global
+        tema_final = max(pesos, key=lambda t: pesos[t] / (suma_temas[t] + 1e-6))
+        ejercicio["tema"] = tema_final
+
+        # Limpieza opcional
+        del ejercicio["pesos"]
+
+    return lista_ejercicios
+
+
+def OLDdeterminarTema(texto, actividad):
     identificador = processControl.defaults['identificador']
     texto = texto.lower()
 
     # Crear un contador para cada subtema
     pesos = {}
-
     # Iterar sobre los subtemas del nivel actual
     for subtema, palabras_clave in identificador.get(actividad, {}).items():
         peso = 0

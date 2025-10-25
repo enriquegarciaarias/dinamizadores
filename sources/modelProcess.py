@@ -135,229 +135,6 @@ class EvaluadorLlama3Local:
         return resultados
 
 
-class OLDEvaluadorLlama3:
-    def __init__(self):
-        # Cargar modelo y tokenizer
-        self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        # 4-bit quantization config
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            quantization_config=bnb_config,
-            device_map=processControl.defaults['device'],
-            torch_dtype=torch.float16,
-            max_memory={"cuda:0": "90%"}
-        )
-        # Modelo para similitud semántica
-        self.sim_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-        # Configuración de generación
-        self.gen_config = {
-            "max_length": 2000,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True
-        }
-        """
-        instrucciones_path = os.path.join(
-            processControl.env['inputPath'],
-            processControl.args.act,
-            f"{processControl.args.act}PlanteamientoYSolucionario.pdf"
-        )
-        if not os.path.exists(instrucciones_path):
-            raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-        self.instrucciones = extraer_texto(instrucciones_path)        
-        """
-
-        self.instrucciones = {}
-
-        for idx, tema in enumerate(processControl.defaults['identificador'][processControl.args.act]):
-            indice = idx + 1
-            instrucciones_path = os.path.join(
-                processControl.env['inputPath'],
-                processControl.args.act,
-                f"{processControl.args.act}PlanteamientoYSolucionario{indice}.pdf"
-            )
-            if not os.path.exists(instrucciones_path):
-                raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-            self.instrucciones[tema] = extraer_texto(instrucciones_path)
-
-        """
-        instrucciones_path = os.path.join(
-            processControl.env['inputPath'],
-            processControl.args.act,
-            f"{processControl.args.act}PlanteamientoYSolucionario2.pdf"
-        )
-        if not os.path.exists(instrucciones_path):
-            raise FileNotFoundError(f"No se encontraron las instrucciones en {instrucciones_path}")
-        self.instrucciones['teletrabajo'] = extraer_texto(instrucciones_path)        
-        """
-
-    def calcular_similitud(self, texto1, texto2):
-        """Calcula similitud semántica entre textos"""
-        emb1 = self.sim_model.encode(texto1, convert_to_tensor=True)
-        emb2 = self.sim_model.encode(texto2, convert_to_tensor=True)
-        return util.pytorch_cos_sim(emb1, emb2).item()
-
-    def detectar_IA(self, texto, similitud):
-        """Detecta si el texto parece generado por IA o copiado de chat"""
-        # Umbral de similitud baja y texto largo sugieren IA
-        if similitud < 0.5 and len(texto.split()) > 100:
-            return "Posible uso de IA detectado por baja similitud y longitud excesiva."
-        # Patrones comunes de IA (e.g., repetición, frases genéricas)
-        if "en general" in texto.lower() and "sugerencias de mejora" in texto.lower():
-            return "Posible uso de IA detectado por patrones genéricos."
-        # Detectar copy/paste de chat (tags o frases específicas)
-        chat_tags = ["<|begin_of_text|>", "<|end_of_text|>", "<|start_header_id|>", "<|end_header_id|>"]
-        chat_phrases = ["user:", "assistant:", "por favor, provee", "responde solo con"]
-        if any(tag in texto for tag in chat_tags) or any(phrase in texto.lower() for phrase in chat_phrases):
-            return "Posible copy/paste de chat detectado por tags o frases específicas."
-        return "No se detecta uso claro de IA ni copy/paste de chat."
-
-    def generar_respuesta(self, prompt, max_retries=1):
-        """Genera respuesta usando LLaMA 3 local con reintento si el JSON es inválido"""
-        #prompt = prompt.strip()[:4000]  # Limitar longitud del prompt
-        respuesta_json = None
-        output_text = ""
-
-        for intento in range(max_retries + 1):
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(processControl.defaults['device'])
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    temperature=0.7,
-                    top_p=0.9,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
-                )
-            output_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            respuesta_json = extraer_json_de_texto(output_text)
-            return respuesta_json, output_text
-
-        return None, output_text
-
-    def evaluar_ejercicio(self, ejercicio, tema):
-        """Evalúa el ejercicio según las instrucciones con formato estructurado JSON"""
-        # Calcular similitud semántica
-        instrucciones = self.instrucciones[tema]
-        similitud = self.calcular_similitud(instrucciones, ejercicio)
-        ia_deteccion = self.detectar_IA(ejercicio, similitud)
-
-        # Prompt en formato JSON para mayor fiabilidad
-        prompt = f"""<|begin_of_text|>
-<|start_header_id|>system<|end_header_id|>
-Eres un profesor asistente que evalúa ejercicios de estudiantes en ciberseguridad.
-Evalúa de forma objetiva según las instrucciones dadas más abajo. Devuelve **solo** un JSON con estos campos:
-{{
-  "evaluacion": "Apto", "No Apto" o "Sobresaliente",
-  "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora relacionadas con las instrucciones. Máximo 25 palabras "
-}}
-
-Instrucciones para la evaluación:
-{instrucciones}
-<|eot_id|>
-<|start_header_id|>user<|end_header_id|>
-Aquí tienes el ejercicio del estudiante que debes evaluar:
-
-EJERCICIO DEL ESTUDIANTE:
-{ejercicio}
----
-Evalúa ahora. Devuelve únicamente un JSON **válido**, completo, que comience con `{{` y termine con `}}`.  
-No añadas ningún otro texto antes o después. 
-<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>
-"""
-
-        """
-                respuesta_json, raw_output = self.generar_respuesta(prompt)
-
-        if not respuesta_json:
-            evaluacion = {
-                "evaluacion": "No evaluado",
-                "comentario": "Error al generar una evaluación válida."
-            }
-        else:
-            evaluacion = {
-                "evaluacion": respuesta_json.get("evaluacion", "No especificado"),
-                "comentario": respuesta_json.get("comentario", "Sin comentario")
-            }
-        """
-        respuesta_json, raw_output = None, ""
-        error_msg = None
-        try:
-            respuesta_json, raw_output = self.generar_respuesta(prompt)
-
-        except Exception as e:
-            error_msg = f"Excepción en generar_respuesta: {type(e).__name__} - {e}"
-
-        if not respuesta_json:
-            evaluacion = {
-                "evaluacion": "No evaluado",
-                "comentario": (
-                    f"Error al generar evaluación válida. "
-                    f"{error_msg or ''} "
-                    f"Salida modelo: {raw_output[:300]}..."
-                ).strip()
-            }
-        else:
-            evaluacion = {
-                "evaluacion": respuesta_json.get("evaluacion", "No especificado"),
-                "comentario": respuesta_json.get("comentario", "Sin comentario")
-            }
-
-        return {
-            "respuesta": raw_output,
-            "evaluacion": evaluacion,
-            "IA": ia_deteccion,
-            "similitud": similitud
-        }
-
-    def procesar_lote(self, archivos_ejercicios):
-        """Procesa múltiples ejercicios de forma robusta"""
-        resultados = []
-
-        for archivo in archivos_ejercicios:
-            tema = "indefinido"
-            try:
-                ejercicio = extraer_texto(archivo)
-                inicio = time.time()
-                tema = determinarTema(ejercicio, processControl.args.act)
-                resultado = self.evaluar_ejercicio(ejercicio, tema)
-                duracion = round(time.time() - inicio, 2)
-
-                resultados.append({
-                    "tema": tema,
-                    "archivo": archivo,
-                    "evaluacion": resultado["evaluacion"].get("evaluacion", "Error"),
-                    "comentario": resultado["evaluacion"].get("comentario", ""),
-                    "similitud": round(resultado["similitud"], 3),
-                    "IA_detectada": resultado["IA"],
-                    #"tiempo_procesamiento": duracion,
-                    #"respuesta_modelo": resultado["respuesta"][:1000]  # corta para CSV
-                })
-                log_("info", logger, f'Completado {tema} - {resultado["evaluacion"].get("evaluacion", "Error")} duracion {duracion}')
-
-            except Exception as e:
-                resultados.append({
-                    "tema": tema,
-                    "archivo": archivo,
-                    "evaluacion": "Error",
-                    "comentario": f"Fallo al procesar: {str(e)}",
-                    "similitud": None,
-                    "IA_detectada": "No evaluado",
-                    #"tiempo_procesamiento": 0,
-                    #"respuesta_modelo": ""
-                })
-
-        return resultados
 
 def inicializaEntorno():
     huggingface_login(processControl.defaults['huggingface_login'])
@@ -392,7 +169,7 @@ QUEUE_MAXSIZE = 64                # tamaño máximo de la cola (control de memor
 JSONL_HISTORICO = True            # si True escribe JSONL incremental
 HISTORICO_PATH = lambda: os.path.join(processControl.env['outputPath'], f"historico_{processControl.args.act}")
 INFER_MAX_NEW_TOKENS = 512
-PROMPT_MAX_CHARS = 35000  # Ajustado para prompts largos
+PROMPT_MAX_CHARS = 40000  # Ajustado para prompts largos
 
 class EvaluadorLlama3:
     def __init__(self):
@@ -486,13 +263,27 @@ class EvaluadorLlama3:
         prompt_full = f"""<|begin_of_text|>
 <|start_header_id|>system<|end_header_id|>
 Eres un profesor asistente que evalúa ejercicios de estudiantes en ciberseguridad.
-Devuelve solo un JSON válido con los campos: "evaluacion" y "comentario".
-Instrucciones:
+Evalúa de forma objetiva según las instrucciones dadas más abajo.
+Devuelve **únicamente** un JSON con estos campos:
+{{
+  "evaluacion": "Apto", "No Apto" o "Sobresaliente",
+  "comentario": "Si 'No Apto' expon las razones. Si 'Apto' o 'Sobresaliente' expon sugerencias de mejora relacionadas con las instrucciones. Máximo 25 palabras."
+}}
+
+Instrucciones para la evaluación:
 {instrucciones}
 <|eot_id|>
 <|start_header_id|>user<|end_header_id|>
+Aquí tienes el ejercicio del estudiante que debes evaluar:
+
+EJERCICIO DEL ESTUDIANTE:
 {prompt}
+
+---
+Evalúa ahora. Devuelve únicamente un JSON **válido**, completo, que comience con `{{` y termine con `}}`.
+No añadas ningún otro texto antes o después.
 <|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
 """
         if len(prompt_full) > PROMPT_MAX_CHARS:
             prompt_full = prompt_full[:PROMPT_MAX_CHARS]

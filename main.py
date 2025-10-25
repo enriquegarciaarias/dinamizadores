@@ -17,7 +17,7 @@ def mainProcess():
 
 if __name__ == '__main__':
 
-    log_("info", logger, "********** STARTING Main Image Caption Process **********")
+    log_("info", logger, "********** STARTING Main Dinamizadores Process **********")
     getConfigs()
     mainProcess()
     log_("info", logger, "********** PROCESS COMPLETED **********")

@@ -210,27 +210,28 @@ def writer_thread_fn(result_q, stop_event, historico_path):
             # Persistir cada iteración o cada N elementos según conveniencia
             grabaJson(historico, historico_path)
 
-            resultPath = os.path.join(processControl.env['outputPath'], f"resultados.json")
             datos = []
-            if os.path.exists(resultPath):
-                datos = []
+            if os.path.exists(processControl.env['resultPath']):
                 try:
-                    with open(resultPath, 'r', encoding='utf-8') as archivo:
+                    with open(processControl.env['resultPath'], 'r', encoding='utf-8') as archivo:
                         datos = json.load(archivo)
                 except (json.JSONDecodeError, FileNotFoundError):
                     # Si el archivo está corrupto o vacío, empezar con lista vacía
                     continue
 
             # Agregar el nuevo elemento
+            evaluacion = elemento['evaluacion']
+            if (not isinstance(evaluacion, dict) or
+                    not all(k in evaluacion for k in ("evaluacion", "comentario")) or
+                    evaluacion.get("evaluacion", "Error") == "Error"):
+                evaluacion = elemento["respuesta_modelo"]
             newElement = {
                 "alumno": elemento['alumno'],
                 "tema": elemento['tema'],
-                "evaluacion": elemento['evaluacion'],
+                "evaluacion": evaluacion,
             }
             datos.append(newElement)
-            # Escribir de vuelta al archivo
-            with open(resultPath, 'w', encoding='utf-8') as archivo:
-                json.dump(datos, archivo, ensure_ascii=False, indent=2)
+            grabaJson(datos, processControl.env['resultPath'])
             log_("info", logger, f"Resultados: {elemento.get('alumno')} - {elemento.get('tema')} - {elemento.get('evaluacion').get('evaluacion')}")
 
 
@@ -327,16 +328,26 @@ def procesar_lote_pipeline(evaluador, ejercicios_por_alumno, instrucciones_por_t
             alumno = entry.get("alumno")
             ejercicios = entry.get("ejercicios", [])
             resumen_alumno = {"alumno": alumno, "resultados": []}
-
+            temaEjercicios = []
             for elemento in ejercicios:
-
                 # extracción ligera
                 extraccion = extraerTextoMetas(elemento)
                 ejercicio_texto = extraccion.get("texto", "")
                 metas = extraccion.get("metadatos", {})
+                temaEjercicios.append({
+                    "ejercicioTexto": ejercicio_texto,
+                    "metas": metas,
+                    "elemento": elemento,
+                })
+            temaEjercicios = determinarTema(temaEjercicios, processControl.args.act)
 
+            for item in temaEjercicios:
+                elemento = item["elemento"]
+                ejercicio_texto = item["ejercicioTexto"]
+                metas = item["metas"]
+                tema = item["tema"]
                 # determinar tema y hash localmente
-                tema = determinarTema(ejercicio_texto, processControl.args.act)
+                #tema = determinarTema(ejercicio_texto, processControl.args.act)
                 hashValue = texto_hash(ejercicio_texto)
 
                 # chunk de prompt para evitar OOM
@@ -381,6 +392,7 @@ def dinamizaProcess():
     con GPU worker y writer thread.
     """
     inicializaEntorno()
+    processControl.env['resultPath'] = os.path.join(processControl.env['outputPath'], f"{processControl.args.act}_resultados-{dbTimestamp()}.json")
 
     # --- Obtener ejercicios y paths ---
     try:
@@ -409,15 +421,13 @@ def dinamizaProcess():
     # --- Ejecutar pipeline con threads ---
     resumen = procesar_lote_pipeline(evaluador, ejercicios_por_alumno, instrucciones_por_tema)
 
-    # --- Persistir resumen compacto ---
-    periodo = dbTimestamp()
-    jsonPath = os.path.join(processControl.env['outputPath'], f"{processControl.args.act}_resultados-{periodo}.json")
-    grabaJson(resumen, jsonPath)
-
     # --- Mover y limpiar input/output ---
+    """
     inputZipPath = os.path.join(processControl.env['inputPath'], zipFileName)
     outputZipPath = os.path.join(processControl.env['outputPath'], f"{periodo}_{zipFileName}")
-    clean_and_move(output_dir, inputZipPath, outputZipPath)
+    clean_and_move(output_dir, inputZipPath, outputZipPath)    
+    """
+
 
     # --- Liberar modelo y memoria ---
     try:
